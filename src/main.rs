@@ -6,7 +6,7 @@ use std::process::{Command, exit, Stdio};
 use std::time::{Duration};
 
 use anyhow::{Context, Result};
-use clap::{crate_description, crate_name, crate_version, value_t_or_exit, Arg, App};
+use clap::{crate_description, crate_name, crate_version, Arg, App};
 
 use bkt::{CommandDesc, Bkt};
 
@@ -84,54 +84,56 @@ fn main() {
     let matches = App::new(crate_name!())
         .version(crate_version!())
         .about(crate_description!())
-        .arg(Arg::with_name("command")
+        .arg(Arg::new("command")
             .required(true)
-            .multiple(true)
+            .multiple_occurrences(true)
+            .allow_invalid_utf8(true)
             .last(true)
             .help("The command to run"))
-        .arg(Arg::with_name("ttl")
+        .arg(Arg::new("ttl")
             .long("time-to-live")
             .visible_alias("ttl")
             .default_value("60s")
             .help("Duration the cached result will be valid"))
-        .arg(Arg::with_name("stale")
+        .arg(Arg::new("stale")
             .long("stale")
             .takes_value(true)
             .conflicts_with("warm")
             .help("Duration after which the cached result will be asynchronously refreshed"))
-        .arg(Arg::with_name("warm")
+        .arg(Arg::new("warm")
             .long("warm")
             .takes_value(false)
             .help("Asynchronously execute and cache the given command, even if it's already cached"))
-        .arg(Arg::with_name("force")
+        .arg(Arg::new("force")
             .long("force")
             .takes_value(false)
             .conflicts_with("warm")
             .help("Execute and cache the given command, even if it's already cached"))
-        .arg(Arg::with_name("cwd")
+        .arg(Arg::new("cwd")
             .long("use-working-dir")
             .visible_alias("cwd")
             .takes_value(false)
             .help("Includes the current working directory in the cache key, so that the same \
                    command run in different directories caches separately"))
-        .arg(Arg::with_name("env")
+        .arg(Arg::new("env")
             .long("use-environment")
             .visible_alias("env")
             .takes_value(true)
-            .multiple(true)
+            .multiple_occurrences(true)
+            .allow_invalid_utf8(true)
             .help("Includes the given environment variable in the cache key, so that the same \
                    command run with different values for the given variables caches separately"))
-        .arg(Arg::with_name("discard-failures")
+        .arg(Arg::new("discard-failures")
             .long("discard-failures")
             .help("Don't cache invocations that fail (non-zero exit code). USE CAUTION when \
                       passing this flag, as unexpected failures can lead to a spike in invocations \
                       which can exacerbate ongoing issues, effectively a DDoS."))
-        .arg(Arg::with_name("scope")
+        .arg(Arg::new("scope")
             .long("scope")
             .takes_value(true)
             .help("If set, all cached data will be scoped to this value, preventing collisions \
                    with commands cached with different scopes"))
-        .arg(Arg::with_name("cache_dir")
+        .arg(Arg::new("cache_dir")
             .long("cache-dir")
             .takes_value(true)
             .help("The directory under which to persist cached invocations; defaults to the \
@@ -144,21 +146,23 @@ fn main() {
     let command = CommandDesc::new(matches.values_of_os("command").expect("Required").collect::<Vec<_>>());
     let use_cwd = matches.is_present("cwd");
     let env = matches.values_of_os("env").map(|e| e.collect()).unwrap_or_else(BTreeSet::new);
-    let ttl = value_t_or_exit!(matches.value_of("ttl"), humantime::Duration).into();
+    let ttl = matches.value_of_t_or_exit::<humantime::Duration>("ttl").into();
 
     // https://github.com/clap-rs/clap/discussions/2453
-    let stale = matches.value_of("stale")
-        .map(|v|
-            v.parse::<humantime::Duration>()
-                .map_err(|v| ::clap::Error::value_validation_auto(
-                    format!("The argument '{}' isn't a valid value", v)))
-                .unwrap_or_else(|e| e.exit())
-                .into());
+    let stale: Option<Duration> = match matches.value_of_t::<humantime::Duration>("stale") {
+        Ok(t) => Ok(Some(t.into())),
+        Err(e) => {
+            match e.kind {
+                ::clap::ErrorKind::ArgumentNotFound => Ok(None),
+                _ => Err(e),
+            }
+        }
+    }.unwrap_or_else(|e| e.exit());
     let warm = matches.is_present("warm");
 
     let force = matches.is_present("force");
 
-    match run(root_dir, discard_failures, scope, command, use_cwd, env, ttl, stale, warm, force) {
+    match run(root_dir, discard_failures, scope, command, use_cwd, env, ttl, stale.map(Into::into), warm, force) {
         Ok(code) => exit(code),
         Err(msg) => {
             eprintln!("bkt: {:#}", msg);
